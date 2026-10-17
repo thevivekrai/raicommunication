@@ -1,0 +1,204 @@
+// DemoDash database schema (PostgreSQL)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  EMPLOYEE
+  DELIVERY
+}
+
+enum BookingStatus {
+  PENDING
+  ASSIGNED
+  OUT_FOR_DEMO // delivery person is on the way
+  ARRIVED
+  DEMO_IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum BookingOutcome {
+  PURCHASED_OFFLINE
+  NOT_PURCHASED
+  CUSTOMER_UNAVAILABLE // no show
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+  SMS
+}
+
+enum NotificationState {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  role         Role
+  name         String
+  email        String?   @unique
+  phone        String?   @unique
+  passwordHash String    @map("password_hash")
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  deliveryProfile  DeliveryPersonProfile?
+  createdProducts  MobileProduct[]        @relation("ProductCreator")
+  statusChanges    BookingStatusHistory[]
+
+  @@map("users")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String   @unique
+  email     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  bookings DemoBooking[]
+
+  @@map("customers")
+}
+
+// `category` lets other product types (AC, washing machine...) reuse the same table later.
+model MobileProduct {
+  id               String   @id @default(cuid())
+  category         String   @default("MOBILE")
+  brand            String
+  model            String
+  shortDescription String?  @map("short_description")
+  price            Int // INR, whole rupees
+  ramStorage       String   @map("ram_storage") // e.g. "8GB / 128GB"
+  color            String
+  specs            Json     @default("{}") // { display, camera, battery, chipset, ... }
+  images           String[]
+  demoAvailable    Boolean  @default(true) @map("demo_available")
+  isActive         Boolean  @default(true) @map("is_active") // soft delete
+  createdByUserId  String?  @map("created_by_user_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  createdBy User?         @relation("ProductCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  bookings  DemoBooking[]
+
+  @@index([category, isActive])
+  @@index([brand])
+  @@map("mobile_products")
+}
+
+model DemoBooking {
+  id          String @id @default(cuid())
+  // Public, unguessable booking reference shown to the customer (also used in the tracking URL).
+  code        String @unique
+
+  customerId  String @map("customer_id")
+  productId   String @map("product_id")
+
+  address     String
+  lat         Float?
+  lng         Float?
+  preferredTime DateTime? @map("preferred_time") // null = ASAP
+  notes       String?
+
+  status      BookingStatus @default(PENDING)
+  assignedDeliveryPersonId String? @map("assigned_delivery_person_id")
+  otp         String // 4-digit handover OTP shown to the customer
+  otpVerifiedAt DateTime? @map("otp_verified_at")
+  
+
+  outcome     BookingOutcome?
+  saleAmount  Int?    @map("sale_amount")
+  outcomeNotes String? @map("outcome_notes")
+
+  rating        Int?
+  ratingComment String? @map("rating_comment")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
+
+  customer Customer      @relation(fields: [customerId], references: [id])
+  product  MobileProduct @relation(fields: [productId], references: [id])
+  assignedDeliveryPerson DeliveryPersonProfile? @relation(fields: [assignedDeliveryPersonId], references: [id], onDelete: SetNull)
+  history  BookingStatusHistory[]
+
+  @@index([status])
+  @@index([productId])
+  @@index([assignedDeliveryPersonId, status])
+  @@index([createdAt])
+  @@map("demo_bookings")
+}
+
+model DeliveryPersonProfile {
+  id          String   @id @default(cuid())
+  userId      String   @unique @map("user_id")
+  name        String
+  phone       String
+  photo       String?
+  vehicle     String?
+  currentLat  Float?   @map("current_lat")
+  currentLng  Float?   @map("current_lng")
+  locationUpdatedAt DateTime? @map("location_updated_at")
+  isAvailable Boolean  @default(true) @map("is_available")
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings DemoBooking[]
+
+  @@map("delivery_person_profiles")
+}
+
+model BookingStatusHistory {
+  id          String        @id @default(cuid())
+  bookingId   String        @map("booking_id")
+  status      BookingStatus
+  note        String?
+  actorUserId String?       @map("actor_user_id")
+  timestamp   DateTime      @default(now())
+
+  booking DemoBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  actor   User?       @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId, timestamp])
+  @@map("booking_status_history")
+}
+
+model NotificationLog {
+  id        String              @id @default(cuid())
+  type      String // e.g. BOOKING_CREATED_ADMIN, BOOKING_CREATED_CUSTOMER, PHONE_OTP
+  channel   NotificationChannel
+  recipient String
+  status    NotificationState
+  error     String?
+  payload   Json?
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("notification_logs")
+}
+
+// Customer phone verification codes (stored hashed).
+model PhoneOtp {
+  id        String    @id @default(cuid())
+  phone     String
+  codeHash  String    @map("code_hash")
+  attempts  Int       @default(0)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([phone, createdAt])
+  @@map("phone_otps")
+}
